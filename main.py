@@ -4,12 +4,15 @@ import openpyxl
 import requests
 import langchain
 import pyaudio
-# Se usar Ollama:
+# tamo usando llama3
 import ollama
 import requests
 import webbrowser
+import re  # n sei oq essa bib faz
+import json
+from typing import Optional, Tuple, Any
 
-# Função para criar/abrir planilha de produtos (agora com coluna preço)
+# Função para criar/abrir planilha de produtos
 def carregar_planilha(nome_arquivo="lista_compras.xlsx"):
     try:
         wb = openpyxl.load_workbook(nome_arquivo)
@@ -25,16 +28,6 @@ def carregar_planilha(nome_arquivo="lista_compras.xlsx"):
         ws.append(["Produto", "Preço"])
         wb.save(nome_arquivo)
     return wb
-
-# Função para adicionar produto com preço opcional
-def adicionar_produto(produto, preco=None, nome_arquivo="lista_compras.xlsx"):
-    wb = carregar_planilha(nome_arquivo)
-    ws = wb["Produtos"]
-    if preco is not None:
-        ws.append([produto, preco])
-    else:
-        ws.append([produto, ""])
-    wb.save(nome_arquivo)
 
 # Função para listar produtos e preços
 def listar_produtos(nome_arquivo="lista_compras.xlsx"):
@@ -64,6 +57,76 @@ def gerar_link_whatsapp(produtos):
     webbrowser.open(link)
     return link
 
+# Função para adicionar produto com preço opcional
+def adicionar_produto(produto, preco=None, nome_arquivo="lista_compras.xlsx"):
+    wb = carregar_planilha(nome_arquivo)
+    ws = wb["Produtos"]
+    if preco is not None:
+        ws.append([produto, preco])
+    else:
+        ws.append([produto, ""])
+    wb.save(nome_arquivo)
+
+# ================================#
+# Interpretação via LLM (Ollama)  #
+# ================================#
+
+LLM_MODEL = "llama3"  # modelo usado LOCAL
+
+LLM_SYSTEM_PROMPT = (
+    "Você é um parser de comandos de lista de compras. \n"
+    "Recebe uma frase em português informal e DEVE responder somente um JSON válido, sem explicações. \n"
+    "Campos: action (adicionar|remover|listar|enviar|sair|desconhecido), product (string ou null), price (float ou null). \n"
+    "Regras: \n- Se ação envolver adicionar ou remover, tente extrair o produto. \n"
+    "- Produto é o nome livre após remover verbos de ação. \n"
+    "- Preço: detectar número (inteiro ou decimal) possivelmente seguido de 'reais', 'real', 'R$', 'rs'. Converter vírgula para ponto. \n"
+    "- Se não houver preço, usar null. \n"
+    "- Se ação não reconhecida: action=desconhecido. \n"
+    "Responda somente JSON."
+)
+
+def chamar_llm(frase: str) -> Optional[dict[str, Any]]:
+    try:
+        resp = ollama.chat(model=LLM_MODEL, messages=[
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": frase}
+        ])
+        conteudo = resp.get("message", {}).get("content", "").strip()
+        # Tentar isolar JSON (caso o modelo responda com texto extra)
+        inicio = conteudo.find('{')
+        fim = conteudo.rfind('}')
+        if inicio != -1 and fim != -1:
+            conteudo = conteudo[inicio:fim+1]
+        return json.loads(conteudo)
+    except Exception as e:
+        print(f"[LLM] Falha ao interpretar via LLM: {e}")
+        return None
+
+def interpretar_comando_llm(frase: str) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    if not frase:
+        return None, None, None
+    data = chamar_llm(frase)
+    if not data:
+        return None, None, None
+    action = data.get("action")
+    product = data.get("product") or None
+    price = data.get("price")
+    # Normalizações
+    if isinstance(action, str):
+        action = action.lower().strip()
+    if action not in {"adicionar", "remover", "listar", "enviar", "sair", "desconhecido"}:
+        action = "desconhecido"
+    if isinstance(price, str):
+        try:
+            price = float(price.replace(',', '.'))
+        except Exception:
+            price = None
+    if isinstance(price, (int, float)):
+        price = float(price)
+    else:
+        price = None if price is not None and price != price else price  # trata NaN
+    return (action if action != "desconhecido" else None), product, price
+
 # Função para reconhecer comando de voz
 def reconhecer_comando():
     r = sr.Recognizer()
@@ -83,7 +146,7 @@ def reconhecer_comando():
 
 # Função para reconhecer palavra de ativação
 
-def ouvir_ate_ativacao(wake_word="agente"):
+def ouvir_ate_ativacao(wake_word="oi"):
     r = sr.Recognizer()
     while True:
         with sr.Microphone() as source:
@@ -93,61 +156,52 @@ def ouvir_ate_ativacao(wake_word="agente"):
             texto = r.recognize_google(audio, language="pt-BR")
             print(f"Você disse: {texto}")
             if wake_word in texto.lower():
-                print("agente ativada! Fale seu comando...")
+                print("oi ativada! Fale seu comando...")
                 return True
         except sr.UnknownValueError:
             print("Não entendi. Tente novamente.")
         except sr.RequestError:
             print("Erro ao acessar o serviço de reconhecimento.")
 
-# Função principal (exemplo de fluxo básico)
+# Função principal 
 def main():
+    print("Agente de lista de compras iniciado (interpretação via LLM apenas).")
     while True:
         ouvir_ate_ativacao()
-        comando = reconhecer_comando()
-        if "adicionar" in comando:
-            dados = comando.replace("adicionar", "").strip().split()
-            produto = None
-            preco = None
-            # Tenta encontrar um valor que seja preço (float)
-            for i, item in enumerate(dados):
-                try:
-                    valor = float(item.replace(",", "."))
-                    preco = valor
-                    produto = " ".join(dados[:i])
-                    break
-                except ValueError:
-                    pass
-            if produto is None:
-                produto = " ".join(dados)
-            if produto:
-                adicionar_produto(produto, preco)
-                if preco is not None:
-                    print(f"Produto '{produto}' adicionado com preço R$ {preco}.")
-                else:
-                    print(f"Produto '{produto}' adicionado sem preço.")
-        elif "remover" in comando:
-            produto = comando.replace("remover", "").strip()
-            if produto:
-                remover_produto(produto)
-                print(f"Produto '{produto}' removido.")
-        elif "listar" in comando:
+        frase = reconhecer_comando()
+        acao, produto, preco = interpretar_comando_llm(frase)
+        if not acao:
+            print("Não entendi a ação. Tente novamente.")
+            continue
+        if acao == "sair":
+            print("Encerrando agente.")
+            break
+        if acao == "listar":
             produtos = listar_produtos()
-            print("Produtos:", produtos)
-        elif "enviar" in comando:
+            print("Produtos:", produtos if produtos else "(lista vazia)")
+            continue
+        if acao == "enviar":
             produtos = listar_produtos()
             link = gerar_link_whatsapp(produtos)
             print("Link para WhatsApp:", link)
-        elif "sair" in comando:
-            print("Encerrando agente.")
-            break
-        else:
-            print("Comando não reconhecido. Tente novamente.")
-def gerar_link_whatsapp(produtos):
-    texto = "Lista de compras: " + ", ".join(produtos)
-    numero = "5541988039241"
-    link = f"https://wa.me/{numero}?text={requests.utils.quote(texto)}"
-    webbrowser.open(link)
-    return f"https://wa.me/{numero}?text={requests.utils.quote(texto)}"
+            continue
+        if acao == "adicionar":
+            if not produto:
+                print("Não identifiquei o nome do produto para adicionar.")
+                continue
+            adicionar_produto(produto, preco)
+            if preco is not None:
+                print(f"Produto '{produto}' adicionado com preço R$ {preco}.")
+            else:
+                print(f"Produto '{produto}' adicionado sem preço.")
+            continue
+        if acao == "remover":
+            if not produto:
+                print("Não identifiquei o nome do produto para remover.")
+                continue
+            remover_produto(produto)
+            print(f"Produto '{produto}' removido.")
+            continue
+
 if __name__ == "__main__":
     main()
