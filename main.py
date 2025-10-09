@@ -1,16 +1,10 @@
 import speech_recognition as sr
-import pyttsx3
 import openpyxl
 import requests
-import langchain
-import pyaudio
-# tamo usando llama3
-import ollama
-import requests
 import webbrowser
-import re  # n sei oq essa bib faz
 import json
 from typing import Optional, Tuple, Any
+import ollama  # LLM local
 
 # Função para criar/abrir planilha de produtos
 def carregar_planilha(nome_arquivo="lista_compras.xlsx"):
@@ -145,7 +139,6 @@ def reconhecer_comando():
         return ""
 
 # Função para reconhecer palavra de ativação
-
 def ouvir_ate_ativacao(wake_word="oi"):
     r = sr.Recognizer()
     while True:
